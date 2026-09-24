@@ -1,0 +1,479 @@
+import asyncio
+import json
+import urllib.parse
+import urllib.request
+import urllib.error
+from datetime import datetime, timezone
+
+from config import BIRDEYE_API_KEY
+from scanner.filters import validate_token
+from scanner.overview import get_token_overview
+from scanner.risk import analyze_token, print_analysis
+from scanner.signals import generate_signal, print_signal
+
+# Tokens whose overview has already been successfully analyzed.
+analyzed_tokens = set()
+
+
+# ============================================================
+# CONFIGURATION
+# ============================================================
+
+BIRDEYE_URL = (
+    "https://public-api.birdeye.so/defi/v2/tokens/new_listing"
+)
+
+CHAIN = "solana"
+
+# How many new listings to request each time.
+LIMIT = 20
+
+# How often to poll Birdeye.
+POLL_INTERVAL = 10
+
+# Include meme-platform launches such as pump.fun.
+MEME_PLATFORM_ENABLED = True
+
+# Safety switch — trading remains OFF.
+LIVE_TRADING = False
+
+
+# ============================================================
+# STATE
+# ============================================================
+
+seen_tokens = set()
+
+
+# ============================================================
+# FETCH NEW LISTINGS
+# ============================================================
+
+def fetch_new_listings():
+    """
+    Fetch recently listed Solana tokens from Birdeye.
+    """
+
+    if not BIRDEYE_API_KEY:
+        raise RuntimeError(
+            "BIRDEYE_API_KEY is missing from .env"
+        )
+
+    params = {
+        "limit": LIMIT,
+        "meme_platform_enabled": str(
+            MEME_PLATFORM_ENABLED
+        ).lower(),
+    }
+
+    url = (
+        BIRDEYE_URL
+        + "?"
+        + urllib.parse.urlencode(params)
+    )
+
+    request = urllib.request.Request(
+        url,
+        headers={
+            "X-API-KEY": BIRDEYE_API_KEY,
+            "x-chain": CHAIN,
+            "User-Agent": "Solana-Degen-Bot/1.0",
+        },
+        method="GET",
+    )
+
+    try:
+
+        with urllib.request.urlopen(
+            request,
+            timeout=20,
+        ) as response:
+
+            body = response.read().decode(
+                "utf-8"
+            )
+
+            return json.loads(body)
+
+    except urllib.error.HTTPError as error:
+
+        body = error.read().decode(
+            "utf-8",
+            errors="replace",
+        )
+
+        print()
+        print(
+            f"❌ Birdeye HTTP error: {error.code}"
+        )
+
+        print(body[:1000])
+
+        return None
+
+    except Exception as error:
+
+        print()
+        print(
+            "❌ Birdeye request failed:"
+        )
+
+        print(
+            repr(error)
+        )
+
+        return None
+
+
+# ============================================================
+# PROCESS TOKEN
+# ============================================================
+
+def process_token(token):
+    """
+    Process a newly discovered token.
+    """
+
+    address = token.get(
+        "address"
+    )
+
+    if not address:
+        return
+
+    # Ignore tokens we've already processed.
+    if address in seen_tokens:
+        print()
+        print("⏭️ Already analyzed; skipping duplicate.")
+        print(f"Address: {address}")
+        return
+
+    # --------------------------------------------------------
+    # BASIC TOKEN FILTER
+    # --------------------------------------------------------
+
+    passed, reason = validate_token(token)
+
+    if not passed:
+
+        print()
+        print("=" * 60)
+        print("🔴 TOKEN REJECTED")
+        print("=" * 60)
+
+        print(
+            f"Name:       {token.get('name', 'UNKNOWN')}"
+        )
+
+        print(
+            f"Symbol:     {token.get('symbol', 'UNKNOWN')}"
+        )
+
+        print(
+            f"Address:    {address}"
+        )
+
+        print(
+            f"Reason:     {reason}"
+        )
+
+        print("=" * 60)
+
+        return
+
+    print()
+    print("=" * 60)
+    print("🟢 TOKEN PASSED FILTER")
+    print("=" * 60)
+
+    # --------------------------------------------------------
+    # STAGE 3 — DETAILED BIRDEYE OVERVIEW
+    # --------------------------------------------------------
+
+    print(
+        "🔎 Fetching detailed token data..."
+    )
+
+    overview = get_token_overview(
+        address
+    )
+
+    if not overview:
+
+        print()
+        print(
+            "⚠️ Could not retrieve token overview."
+        )
+
+        print(
+            "Token will NOT proceed to trading logic."
+        )
+
+        print(
+            "🔴 LIVE TRADING: OFF"
+        )
+
+        return
+
+    # Overview was successfully retrieved.
+    # Only now mark the token as processed.
+    seen_tokens.add(address)
+
+    # --------------------------------------------------------
+    # STAGE 3 — RISK / QUALITY ANALYSIS
+    # --------------------------------------------------------
+
+    analysis = analyze_token(
+        overview
+    )
+
+    print_analysis(
+        overview,
+        analysis
+    )
+
+    # --------------------------------------------------------
+    # STAGE 4 — DEGEN SIGNAL ENGINE
+    # --------------------------------------------------------
+
+    signal_data = generate_signal(
+        overview,
+        analysis
+    )
+
+    print_signal(
+        signal_data
+    )
+
+    symbol = token.get(
+        "symbol",
+        "UNKNOWN",
+    )
+
+    name = token.get(
+        "name",
+        "UNKNOWN",
+    )
+
+    source = token.get(
+        "source",
+        "UNKNOWN",
+    )
+
+    liquidity = token.get(
+        "liquidity",
+        0,
+    )
+
+    listed_at = token.get(
+        "liquidityAddedAt",
+        "UNKNOWN",
+    )
+
+    logo = token.get(
+        "logoURI",
+        "",
+    )
+
+    print()
+    print(
+        "=" * 60
+    )
+
+    print(
+        "🚀 NEW SOLANA TOKEN"
+    )
+
+    print(
+        "=" * 60
+    )
+
+    print(
+        f"Name:       {name}"
+    )
+
+    print(
+        f"Symbol:     {symbol}"
+    )
+
+    print(
+        f"Address:    {address}"
+    )
+
+    print(
+        f"Source:     {source}"
+    )
+
+    print(
+        f"Liquidity:  {liquidity}"
+    )
+
+    print(
+        f"Listed:     {listed_at}"
+    )
+
+    if logo:
+        print(
+            f"Logo:       {logo}"
+        )
+
+    print(
+        "-" * 60
+    )
+
+    print(
+        "🔴 LIVE TRADING: OFF"
+    )
+
+    print(
+        "=" * 60
+    )
+
+
+# ============================================================
+# PROCESS RESPONSE
+# ============================================================
+
+def process_response(data):
+    """
+    Process Birdeye's new-listing response.
+    """
+
+    if not data:
+        return
+
+    if not data.get(
+        "success",
+        False,
+    ):
+
+        print()
+        print(
+            "⚠️ Birdeye returned an unsuccessful response:"
+        )
+
+        print(
+            json.dumps(
+                data,
+                indent=2,
+                ensure_ascii=False,
+            )
+        )
+
+        return
+
+    response_data = data.get(
+        "data",
+        {},
+    )
+
+    items = response_data.get(
+        "items",
+        [],
+    )
+
+    if not items:
+
+        print(
+            "📭 No new listings returned."
+        )
+
+        return
+
+    print(
+        f"📦 Birdeye returned {len(items)} listings."
+    )
+
+    for token in items:
+
+        process_token(
+            token
+        )
+
+
+# ============================================================
+# SCANNER LOOP
+# ============================================================
+
+async def run_scanner():
+
+    print()
+    print(
+        "🤖 Solana Degen Bot — REST Launch Scanner"
+    )
+
+    print(
+        "=" * 60
+    )
+
+    print(
+        "🟢 Birdeye REST API connected."
+    )
+
+    print(
+        f"🔎 Polling every {POLL_INTERVAL} seconds..."
+    )
+
+    print(
+        "🟢 New-token discovery: ON"
+    )
+
+    print(
+        "🔴 Live trading: OFF"
+    )
+
+    print(
+        "=" * 60
+    )
+
+    while True:
+
+        try:
+
+            data = await asyncio.to_thread(
+                fetch_new_listings
+            )
+
+            process_response(
+                data
+            )
+
+        except Exception as error:
+
+            print()
+            print(
+                "⚠️ Scanner error:"
+            )
+
+            print(
+                repr(error)
+            )
+
+        await asyncio.sleep(
+            POLL_INTERVAL
+        )
+
+
+# ============================================================
+# PROGRAM ENTRY POINT
+# ============================================================
+
+def main():
+
+    try:
+
+        asyncio.run(
+            run_scanner()
+        )
+
+    except KeyboardInterrupt:
+
+        print()
+        print(
+            "🛑 Scanner stopped."
+        )
+
+
+if __name__ == "__main__":
+
+    main()
