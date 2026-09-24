@@ -18,6 +18,9 @@ from trading.safety import (
     SafetyResult,
     validate_trade,
 )
+from trading.execution.emergency import (
+    is_emergency_stop_active,
+)
 
 
 @dataclass(frozen=True)
@@ -55,6 +58,15 @@ def authorize_trade(
         open_positions=open_positions,
         config=config,
     )
+
+    if is_emergency_stop_active():
+        safety_result = SafetyResult(
+            allowed=False,
+            reasons=safety_result.reasons + (
+                "Emergency stop is active.",
+            ),
+            warnings=safety_result.warnings,
+        )
 
     return ExecutionAuthorization(
         authorized=safety_result.allowed,
