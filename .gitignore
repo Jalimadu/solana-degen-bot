@@ -5,3 +5,5 @@ __pycache__/
 data/*.json.env
 
 .trading_settings.json
+
+.trading_positions.json
