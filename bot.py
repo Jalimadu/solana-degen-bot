@@ -1,3 +1,5 @@
+import asyncio
+
 from telegram import Update
 from telegram.ext import (
     Application,
@@ -12,10 +14,26 @@ from config import (
     LIVE_TRADING,
 )
 
+from scanner.launches import run_scanner
+from scanner.watchlist import size as watchlist_size
+
+
+# ============================================================
+# BOT STATE
+# ============================================================
+
 bot_enabled = False
+scanner_task = None
 
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ============================================================
+# START COMMAND
+# ============================================================
+
+async def start(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
     await update.message.reply_text(
         "🤖 SOLANA DEGEN BOT\n\n"
         "System: ONLINE\n"
@@ -30,49 +48,149 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ============================================================
+# STATUS
+# ============================================================
+
+async def status(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    global bot_enabled
+    global scanner_task
+
+    scanner_running = (
+        scanner_task is not None
+        and not scanner_task.done()
+    )
+
     await update.message.reply_text(
         "📊 BOT STATUS\n\n"
         f"Bot: {'ON' if bot_enabled else 'OFF'}\n"
         f"Entry: ${TRADE_AMOUNT_USD:.2f}\n"
         f"Target: {TAKE_PROFIT_MULTIPLE:.0f}×\n"
         f"Live trading: {'ON' if LIVE_TRADING else 'OFF'}\n"
-        "Scanner: OFF\n"
-        "Paper trading: OFF"
+        f"Scanner: {'ON' if scanner_running else 'OFF'}\n"
+        "Paper trading: OFF\n"
+        f"Watchlist: {watchlist_size()}"
     )
 
 
-async def startbot(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ============================================================
+# START SCANNER
+# ============================================================
+
+async def startbot(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
     global bot_enabled
+    global scanner_task
+
+    # --------------------------------------------------------
+    # CHECK IF ALREADY RUNNING
+    # --------------------------------------------------------
+
+    if (
+        scanner_task is not None
+        and not scanner_task.done()
+    ):
+        bot_enabled = True
+
+        await update.message.reply_text(
+            "🟢 Bot is already running.\n\n"
+            "Scanner: ON\n"
+            f"Watchlist: {watchlist_size()}\n"
+            f"Live trading: "
+            f"{'ON' if LIVE_TRADING else 'OFF'}"
+        )
+
+        return
+
+    # --------------------------------------------------------
+    # ENABLE BOT
+    # --------------------------------------------------------
 
     bot_enabled = True
 
+    # --------------------------------------------------------
+    # START SCANNER AS BACKGROUND TASK
+    # --------------------------------------------------------
+
+    scanner_task = asyncio.create_task(
+        run_scanner()
+    )
+
     await update.message.reply_text(
         "🟢 Bot enabled.\n\n"
-        "The trading engine is not active yet.\n"
+        "🔎 Scanner: ON\n"
+        "📡 New-token discovery: ON\n"
+        "📈 Momentum tracking: ON\n"
+        f"🔴 Live trading: "
+        f"{'ON' if LIVE_TRADING else 'OFF'}"
+    )
+
+
+# ============================================================
+# STOP SCANNER
+# ============================================================
+
+async def stopbot(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    global bot_enabled
+    global scanner_task
+
+    bot_enabled = False
+
+    # --------------------------------------------------------
+    # STOP SCANNER TASK
+    # --------------------------------------------------------
+
+    if (
+        scanner_task is not None
+        and not scanner_task.done()
+    ):
+        scanner_task.cancel()
+
+        try:
+            await scanner_task
+
+        except asyncio.CancelledError:
+            pass
+
+    scanner_task = None
+
+    await update.message.reply_text(
+        "🔴 Bot disabled.\n\n"
+        "Scanner: OFF\n"
+        "No new scans will be started.\n"
         "No real trades will be executed."
     )
 
 
-async def stopbot(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global bot_enabled
+# ============================================================
+# SETTINGS
+# ============================================================
 
-    bot_enabled = False
-
-    await update.message.reply_text(
-        "🔴 Bot disabled.\n"
-        "No new trades will be opened."
-    )
-
-
-async def settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def settings(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
     await update.message.reply_text(
         "⚙️ SETTINGS\n\n"
         f"Entry amount: ${TRADE_AMOUNT_USD:.2f}\n"
         f"Take profit: {TAKE_PROFIT_MULTIPLE:.0f}×\n"
-        f"Live trading: {'ON' if LIVE_TRADING else 'OFF'}"
+        f"Live trading: "
+        f"{'ON' if LIVE_TRADING else 'OFF'}\n"
+        f"Watchlist: {watchlist_size()}"
     )
 
+
+# ============================================================
+# APPLICATION
+# ============================================================
 
 def main():
     if not TELEGRAM_BOT_TOKEN:
@@ -87,30 +205,62 @@ def main():
     )
 
     app.add_handler(
-        CommandHandler("start", start)
+        CommandHandler(
+            "start",
+            start,
+        )
     )
 
     app.add_handler(
-        CommandHandler("status", status)
+        CommandHandler(
+            "status",
+            status,
+        )
     )
 
     app.add_handler(
-        CommandHandler("startbot", startbot)
+        CommandHandler(
+            "startbot",
+            startbot,
+        )
     )
 
     app.add_handler(
-        CommandHandler("stopbot", stopbot)
+        CommandHandler(
+            "stopbot",
+            stopbot,
+        )
     )
 
     app.add_handler(
-        CommandHandler("settings", settings)
+        CommandHandler(
+            "settings",
+            settings,
+        )
     )
 
-    print("🤖 Solana Degen Bot is running...")
-    print("🔴 Live trading is disabled.")
+    print(
+        "🤖 Solana Degen Bot is running..."
+    )
 
-    app.run_polling()
+    print(
+        "🔴 Live trading is disabled."
+    )
 
+    try:
+        app.run_polling(close_loop=False)
+    finally:
+        if scanner_task is not None and not scanner_task.done():
+            scanner_task.cancel()
+            try:
+                asyncio.get_event_loop().run_until_complete(scanner_task)
+            except asyncio.CancelledError:
+                pass
+
+
+# ============================================================
+# ENTRY POINT
+# ============================================================
 
 if __name__ == "__main__":
     main()
