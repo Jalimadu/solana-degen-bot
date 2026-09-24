@@ -8,24 +8,24 @@ IMPORTANT:
     This module does NOT send transactions.
     This module does NOT load private keys.
     This module does NOT execute swaps.
-
-It only performs safety checks.
 """
 
 from dataclasses import dataclass
+
+from trading.settings import load_settings
 
 
 @dataclass(frozen=True)
 class SafetyConfig:
     """
-    Hard limits for trade execution.
+    Runtime safety limits.
     """
 
-    max_trade_usd: float = 1.00
-    max_slippage_percent: float = 5.0
-    min_liquidity_usd: float = 1_000.0
-    min_sol_reserve: float = 0.01
-    max_open_positions: int = 3
+    max_trade_usd: float
+    max_slippage_percent: float
+    min_liquidity_usd: float
+    sol_fee_buffer: float
+    max_open_positions: int
 
 
 @dataclass(frozen=True)
@@ -39,6 +39,22 @@ class SafetyResult:
     warnings: tuple[str, ...]
 
 
+def get_safety_config():
+    """
+    Build safety configuration from persistent settings.
+    """
+
+    settings = load_settings()
+
+    return SafetyConfig(
+        max_trade_usd=settings.max_trade_usd,
+        max_slippage_percent=settings.max_slippage_percent,
+        min_liquidity_usd=settings.min_liquidity_usd,
+        sol_fee_buffer=settings.sol_fee_buffer,
+        max_open_positions=settings.max_open_positions,
+    )
+
+
 def validate_trade(
     candidate,
     trade_amount_usd,
@@ -50,19 +66,17 @@ def validate_trade(
     """
     Validate a trade candidate against execution safety limits.
 
-    Returns SafetyResult.
-
     This function never executes a trade.
     """
 
     if config is None:
-        config = SafetyConfig()
+        config = get_safety_config()
 
     reasons = []
     warnings = []
 
     # --------------------------------------------------------
-    # Candidate validation
+    # Candidate
     # --------------------------------------------------------
 
     if not candidate.is_trade_candidate:
@@ -134,7 +148,7 @@ def validate_trade(
         )
 
     # --------------------------------------------------------
-    # Wallet SOL reserve
+    # SOL fee buffer
     # --------------------------------------------------------
 
     try:
@@ -147,11 +161,11 @@ def validate_trade(
         )
         wallet_sol_balance = 0
 
-    if wallet_sol_balance < config.min_sol_reserve:
+    if wallet_sol_balance < config.sol_fee_buffer:
         reasons.append(
             f"Wallet SOL balance is below "
-            f"the required reserve of "
-            f"{config.min_sol_reserve:.4f} SOL."
+            f"the configured SOL fee buffer "
+            f"of {config.sol_fee_buffer:.6f} SOL."
         )
 
     # --------------------------------------------------------
@@ -173,10 +187,7 @@ def validate_trade(
             "Open position count cannot be negative."
         )
 
-    if (
-        open_positions
-        >= config.max_open_positions
-    ):
+    if open_positions >= config.max_open_positions:
         reasons.append(
             f"Maximum open positions "
             f"({config.max_open_positions}) "
@@ -184,7 +195,7 @@ def validate_trade(
         )
 
     # --------------------------------------------------------
-    # Warnings
+    # Candidate warnings
     # --------------------------------------------------------
 
     if candidate.warnings:

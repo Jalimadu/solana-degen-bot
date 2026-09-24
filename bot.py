@@ -1,21 +1,34 @@
 import asyncio
+import os
 
-from telegram import Update
+from telegram import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Update,
+)
 from telegram.ext import (
     Application,
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
 )
 
 from config import (
     TELEGRAM_BOT_TOKEN,
-    TRADE_AMOUNT_USD,
     TAKE_PROFIT_MULTIPLE,
     LIVE_TRADING,
 )
 
 from scanner.launches import run_scanner
 from scanner.watchlist import size as watchlist_size
+
+from trading.settings import (
+    HARD_MAX_OPEN_POSITIONS,
+    HARD_MAX_SLIPPAGE_PERCENT,
+    HARD_MAX_TRADE_USD,
+    settings_summary,
+    update_setting,
+)
 
 
 # ============================================================
@@ -27,7 +40,51 @@ scanner_task = None
 
 
 # ============================================================
-# START COMMAND
+# ADMIN
+# ============================================================
+
+def get_admin_id():
+    value = os.getenv(
+        "TELEGRAM_ADMIN_ID",
+        "",
+    ).strip()
+
+    if not value:
+        return None
+
+    try:
+        return int(value)
+    except ValueError:
+        return None
+
+
+def is_admin(update: Update):
+    admin_id = get_admin_id()
+
+    if admin_id is None:
+        return False
+
+    if update.effective_user is None:
+        return False
+
+    return update.effective_user.id == admin_id
+
+
+async def require_admin(update: Update):
+    if is_admin(update):
+        return True
+
+    await update.message.reply_text(
+        "🔒 Admin access required.\n\n"
+        "Use /myid to see your Telegram ID.\n"
+        "Then configure TELEGRAM_ADMIN_ID."
+    )
+
+    return False
+
+
+# ============================================================
+# START
 # ============================================================
 
 async def start(
@@ -37,14 +94,39 @@ async def start(
     await update.message.reply_text(
         "🤖 SOLANA DEGEN BOT\n\n"
         "System: ONLINE\n"
-        f"Entry: ${TRADE_AMOUNT_USD:.2f}\n"
         f"Target: {TAKE_PROFIT_MULTIPLE:.0f}×\n"
-        f"Live trading: {'ON' if LIVE_TRADING else 'OFF'}\n\n"
+        f"Live trading: "
+        f"{'ON' if LIVE_TRADING else 'OFF'}\n\n"
         "Commands:\n"
         "/status\n"
         "/startbot\n"
         "/stopbot\n"
-        "/settings"
+        "/settings\n"
+        "/myid\n\n"
+        "Trading controls:\n"
+        "/settrade <USD>\n"
+        "/setmaxtrade <USD>\n"
+        "/setpositions <number>\n"
+        "/setslippage <percent>\n"
+        "/setliquidity <USD>\n"
+        "/setfeebuffer <SOL>"
+    )
+
+
+# ============================================================
+# MY ID
+# ============================================================
+
+async def myid(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    if update.effective_user is None:
+        return
+
+    await update.message.reply_text(
+        "🆔 Your Telegram ID:\n\n"
+        f"{update.effective_user.id}"
     )
 
 
@@ -56,9 +138,6 @@ async def status(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
-    global bot_enabled
-    global scanner_task
-
     scanner_running = (
         scanner_task is not None
         and not scanner_task.done()
@@ -67,12 +146,13 @@ async def status(
     await update.message.reply_text(
         "📊 BOT STATUS\n\n"
         f"Bot: {'ON' if bot_enabled else 'OFF'}\n"
-        f"Entry: ${TRADE_AMOUNT_USD:.2f}\n"
-        f"Target: {TAKE_PROFIT_MULTIPLE:.0f}×\n"
-        f"Live trading: {'ON' if LIVE_TRADING else 'OFF'}\n"
+        f"Live trading: "
+        f"{'ON' if LIVE_TRADING else 'OFF'}\n"
         f"Scanner: {'ON' if scanner_running else 'OFF'}\n"
         "Paper trading: OFF\n"
-        f"Watchlist: {watchlist_size()}"
+        f"Watchlist: {watchlist_size()}\n\n"
+        "⚙️ TRADING SETTINGS\n"
+        f"{settings_summary()}"
     )
 
 
@@ -86,10 +166,6 @@ async def startbot(
 ):
     global bot_enabled
     global scanner_task
-
-    # --------------------------------------------------------
-    # CHECK IF ALREADY RUNNING
-    # --------------------------------------------------------
 
     if (
         scanner_task is not None
@@ -107,15 +183,7 @@ async def startbot(
 
         return
 
-    # --------------------------------------------------------
-    # ENABLE BOT
-    # --------------------------------------------------------
-
     bot_enabled = True
-
-    # --------------------------------------------------------
-    # START SCANNER AS BACKGROUND TASK
-    # --------------------------------------------------------
 
     scanner_task = asyncio.create_task(
         run_scanner()
@@ -144,10 +212,6 @@ async def stopbot(
 
     bot_enabled = False
 
-    # --------------------------------------------------------
-    # STOP SCANNER TASK
-    # --------------------------------------------------------
-
     if (
         scanner_task is not None
         and not scanner_task.done()
@@ -174,17 +238,219 @@ async def stopbot(
 # SETTINGS
 # ============================================================
 
+def settings_keyboard():
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "🔄 Refresh",
+                    callback_data="settings_refresh",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    "📖 Commands",
+                    callback_data="settings_help",
+                ),
+            ],
+        ]
+    )
+
+
 async def settings(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
     await update.message.reply_text(
-        "⚙️ SETTINGS\n\n"
-        f"Entry amount: ${TRADE_AMOUNT_USD:.2f}\n"
-        f"Take profit: {TAKE_PROFIT_MULTIPLE:.0f}×\n"
+        "⚙️ TRADING SETTINGS\n\n"
+        f"{settings_summary()}\n\n"
+        "Change values with:\n\n"
+        "/settrade 0.10\n"
+        "/setmaxtrade 0.10\n"
+        "/setpositions 3\n"
+        "/setslippage 5\n"
+        "/setliquidity 1000\n"
+        "/setfeebuffer 0.0001\n\n"
+        f"Hard maximum trade: "
+        f"${HARD_MAX_TRADE_USD:.2f}\n"
+        f"Hard maximum positions: "
+        f"{HARD_MAX_OPEN_POSITIONS}\n"
+        f"Hard maximum slippage: "
+        f"{HARD_MAX_SLIPPAGE_PERCENT:.1f}%\n\n"
         f"Live trading: "
-        f"{'ON' if LIVE_TRADING else 'OFF'}\n"
-        f"Watchlist: {watchlist_size()}"
+        f"{'ON' if LIVE_TRADING else 'OFF'}",
+        reply_markup=settings_keyboard(),
+    )
+
+
+async def settings_callback(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    query = update.callback_query
+
+    await query.answer()
+
+    if query.data == "settings_refresh":
+        await query.edit_message_text(
+            "⚙️ TRADING SETTINGS\n\n"
+            f"{settings_summary()}\n\n"
+            f"Live trading: "
+            f"{'ON' if LIVE_TRADING else 'OFF'}",
+            reply_markup=settings_keyboard(),
+        )
+
+    elif query.data == "settings_help":
+        await query.edit_message_text(
+            "📖 TRADING CONTROL COMMANDS\n\n"
+            "/settrade 0.10\n"
+            "Changes the actual trade amount.\n\n"
+            "/setmaxtrade 0.10\n"
+            "Changes the maximum allowed trade.\n\n"
+            "/setpositions 3\n"
+            "Changes maximum simultaneous positions.\n\n"
+            "/setslippage 5\n"
+            "Changes maximum slippage.\n\n"
+            "/setliquidity 1000\n"
+            "Changes minimum liquidity.\n\n"
+            "/setfeebuffer 0.0001\n"
+            "Changes SOL fee buffer.\n\n"
+            "All setting changes are admin-only."
+        )
+
+
+# ============================================================
+# SETTING HELPER
+# ============================================================
+
+async def change_setting(
+    update: Update,
+    setting_name,
+    label,
+):
+    if not await require_admin(update):
+        return
+
+    if not update.message:
+        return
+
+    if len(update.message.text.split()) != 2:
+        await update.message.reply_text(
+            f"Usage:\n"
+            f"/{label[0]} <value>"
+        )
+        return
+
+    value = update.message.text.split()[1]
+
+    try:
+        settings = update_setting(
+            setting_name,
+            value,
+        )
+
+    except (
+        ValueError,
+        TypeError,
+    ) as exc:
+        await update.message.reply_text(
+            f"❌ Setting rejected.\n\n{exc}"
+        )
+        return
+
+    await update.message.reply_text(
+        "✅ Setting updated.\n\n"
+        f"{settings_summary()}"
+    )
+
+
+# ============================================================
+# SET TRADE AMOUNT
+# ============================================================
+
+async def settrade(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    await change_setting(
+        update,
+        "trade_amount_usd",
+        "settrade",
+    )
+
+
+# ============================================================
+# SET MAX TRADE
+# ============================================================
+
+async def setmaxtrade(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    await change_setting(
+        update,
+        "max_trade_usd",
+        "setmaxtrade",
+    )
+
+
+# ============================================================
+# SET POSITIONS
+# ============================================================
+
+async def setpositions(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    await change_setting(
+        update,
+        "max_open_positions",
+        "setpositions",
+    )
+
+
+# ============================================================
+# SET SLIPPAGE
+# ============================================================
+
+async def setslippage(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    await change_setting(
+        update,
+        "max_slippage_percent",
+        "setslippage",
+    )
+
+
+# ============================================================
+# SET LIQUIDITY
+# ============================================================
+
+async def setliquidity(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    await change_setting(
+        update,
+        "min_liquidity_usd",
+        "setliquidity",
+    )
+
+
+# ============================================================
+# SET SOL FEE BUFFER
+# ============================================================
+
+async def setfeebuffer(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+):
+    await change_setting(
+        update,
+        "sol_fee_buffer",
+        "setfeebuffer",
     )
 
 
@@ -239,6 +505,61 @@ def main():
         )
     )
 
+    app.add_handler(
+        CommandHandler(
+            "myid",
+            myid,
+        )
+    )
+
+    app.add_handler(
+        CommandHandler(
+            "settrade",
+            settrade,
+        )
+    )
+
+    app.add_handler(
+        CommandHandler(
+            "setmaxtrade",
+            setmaxtrade,
+        )
+    )
+
+    app.add_handler(
+        CommandHandler(
+            "setpositions",
+            setpositions,
+        )
+    )
+
+    app.add_handler(
+        CommandHandler(
+            "setslippage",
+            setslippage,
+        )
+    )
+
+    app.add_handler(
+        CommandHandler(
+            "setliquidity",
+            setliquidity,
+        )
+    )
+
+    app.add_handler(
+        CommandHandler(
+            "setfeebuffer",
+            setfeebuffer,
+        )
+    )
+
+    app.add_handler(
+        CallbackQueryHandler(
+            settings_callback,
+        )
+    )
+
     print(
         "🤖 Solana Degen Bot is running..."
     )
@@ -248,12 +569,22 @@ def main():
     )
 
     try:
-        app.run_polling(close_loop=False)
+        app.run_polling(
+            close_loop=False
+        )
+
     finally:
-        if scanner_task is not None and not scanner_task.done():
+        if (
+            scanner_task is not None
+            and not scanner_task.done()
+        ):
             scanner_task.cancel()
+
             try:
-                asyncio.get_event_loop().run_until_complete(scanner_task)
+                asyncio.get_event_loop().run_until_complete(
+                    scanner_task
+                )
+
             except asyncio.CancelledError:
                 pass
 
