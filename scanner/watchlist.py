@@ -224,7 +224,7 @@ def print_watchlist():
 
         if momentum:
             classification = momentum.get(
-                "signal",
+                "classification",
                 "UNKNOWN",
             )
 
